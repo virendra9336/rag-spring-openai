@@ -1,0 +1,18 @@
+spring:
+  datasource:
+    url: jdbc:postgresql://localhost:5432/ragdb
+    username: raguser
+    password: ragpass
+    hikari:
+      maximum-pool-size: 5
+  jpa:
+    hibernate:
+      ddl-auto: update
+    show-sql: false
+
+  ai:
+    openai:
+      api-key: ${KEY}
+
+server:
+  port: 8080
