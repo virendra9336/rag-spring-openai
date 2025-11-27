@@ -4,69 +4,176 @@ import com.example.ragspringopenai.model.DocumentChunk;
 import com.example.ragspringopenai.repo.DocumentChunkRepository;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
-import org.springframework.beans.factory.annotation.Autowired;
-import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Transactional;
 import org.springframework.ai.embedding.EmbeddingModel;
+import org.springframework.ai.openai.OpenAiChatModel;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.http.ResponseEntity;
+import org.springframework.stereotype.Service;
 
 import java.time.Instant;
 import java.util.*;
 import java.util.stream.Collectors;
 
 @Service
+@Transactional
 public class EmbeddingService {
 
+    private final EmbeddingModel embeddingModel;
     @Autowired
-    private EmbeddingModel embeddingModel;
-
+    private OpenAiChatModel chatModel;
     private final DocumentChunkRepository repo;
     private final ObjectMapper mapper = new ObjectMapper();
 
     @Autowired
-    public EmbeddingService(DocumentChunkRepository repo) {
+    public EmbeddingService(
+            EmbeddingModel embeddingModel,
+            OpenAiChatModel chatModel,
+            DocumentChunkRepository repo
+    ) {
+        this.embeddingModel = embeddingModel;
+        this.chatModel = chatModel;
         this.repo = repo;
     }
 
-    // Corrected: embed() returns List<float[]>
+    /* ---------------------------------------------------------------------
+     * 1. Generate Embedding
+     * --------------------------------------------------------------------- */
+
     public List<Double> getEmbedding(String text) {
         List<float[]> embeddings = embeddingModel.embed(List.of(text));
-        float[] embArray = embeddings.get(0);
-        // convert float[] → List<Double>
-        List<Double> embList = new ArrayList<>();
-        for (float f : embArray) embList.add((double) f);
-        return embList;
+        float[] arr = embeddings.get(0);
+
+        List<Double> list = new ArrayList<>(arr.length);
+        for (float f : arr) {
+            list.add((double) f);
+        }
+        return list;
     }
 
-    public DocumentChunk saveChunk(String docId, String chunkText, List<Double> embedding) throws Exception {
+    /* ---------------------------------------------------------------------
+     * 2. Save Chunk
+     * --------------------------------------------------------------------- */
+    public DocumentChunk saveChunk(
+            String docId,
+            String username,
+            String email,
+            String contactNumber,
+            String chunkText,
+            List<Double> embedding
+    ) throws Exception {
+
         String embJson = mapper.writeValueAsString(embedding);
+
         DocumentChunk chunk = DocumentChunk.builder()
                 .docId(docId)
+                .username(username)
+                .email(email)
+                .contactNumber(contactNumber)
                 .chunkText(chunkText)
                 .embeddingJson(embJson)
                 .createdAt(Instant.now())
                 .build();
+
         return repo.save(chunk);
     }
 
-    public List<Map.Entry<DocumentChunk, Double>> searchByEmbedding(List<Double> queryEmbedding, double threshold) throws Exception {
-        List<DocumentChunk> all = repo.findAll();
-        List<Map.Entry<DocumentChunk, Double>> entries = new ArrayList<>();
-        for (DocumentChunk dc : all) {
-            List<Double> emb = mapper.readValue(dc.getEmbeddingJson(), new TypeReference<List<Double>>() {});
-            if (emb.size() != queryEmbedding.size()) continue;
-            double sim = cosineSimilarity(queryEmbedding, emb);
-            entries.add(Map.entry(dc, sim));
-        }
-        entries.sort((e1, e2) -> Double.compare(e2.getValue(), e1.getValue()));
-        return entries.stream().filter(e -> e.getValue() >= threshold).collect(Collectors.toList());
+    /* ---------------------------------------------------------------------
+     * 3. Generic Search (Overloaded)
+     * --------------------------------------------------------------------- */
+    public List<Map.Entry<DocumentChunk, Double>> searchByEmbedding(
+            List<Double> queryEmbedding,
+            double threshold
+    ) throws Exception {
+        return searchByEmbedding(queryEmbedding, threshold, null);
     }
 
+    /* ---------------------------------------------------------------------
+     * 4. Search by Embedding (Vector Search)
+     * --------------------------------------------------------------------- */
+    public List<Map.Entry<DocumentChunk, Double>> searchByEmbedding(
+            List<Double> queryEmbedding,
+            double threshold,
+            String contactNumber
+    ) throws Exception {
+
+        List<DocumentChunk> chunks =
+                (contactNumber == null || contactNumber.isBlank())
+                        ? repo.findAll()
+                        : repo.findByContactNumber(contactNumber);
+
+        List<Map.Entry<DocumentChunk, Double>> results = new ArrayList<>();
+
+        for (DocumentChunk chunk : chunks) {
+
+            List<Double> chunkEmbedding =
+                    mapper.readValue(chunk.getEmbeddingJson(), new TypeReference<List<Double>>() {});
+
+            // Skip corrupted embeddings
+            if (chunkEmbedding.size() != queryEmbedding.size()) {
+                continue;
+            }
+
+            double score = cosineSimilarity(queryEmbedding, chunkEmbedding);
+            results.add(Map.entry(chunk, score));
+        }
+
+        return results.stream()
+                .filter(e -> e.getValue() >= threshold)
+                .sorted((a, b) -> Double.compare(b.getValue(), a.getValue())) // descending
+                .collect(Collectors.toList());
+    }
+
+    /* ---------------------------------------------------------------------
+     * 5. Full RAG Search – Retrieve → Enhance → Generate
+     * --------------------------------------------------------------------- */
+    public ResponseEntity<?> fullRagSearch(
+            String question,
+            List<Double> queryEmbedding,
+            double threshold,
+            String contactNumber) throws Exception {
+
+        List<Map.Entry<DocumentChunk, Double>> matches =
+                searchByEmbedding(queryEmbedding, threshold, contactNumber);
+
+        if (matches.isEmpty()) {
+            return ResponseEntity.ok(Map.of(
+                    "found", false,
+                    "answer", "No relevant information found in the PDF."
+            ));
+        }
+
+        StringBuilder context = new StringBuilder();
+        matches.forEach(m -> context.append(m.getKey().getChunkText()).append("\n\n"));
+
+        String prompt =
+                "Use ONLY the following text to answer the question:\n\n"
+                        + context
+                        + "\n\nQuestion: " + question
+                        + "\nAnswer from the text only.";
+
+        // FIX → Using Spring AI OpenAIChatModel
+        String answer = chatModel.call(prompt);
+
+        return ResponseEntity.ok(Map.of(
+                "found", true,
+                "matches", matches.size(),
+                "answer", answer
+        ));
+    }
+
+    /* ---------------------------------------------------------------------
+     * Utility: Cosine Similarity
+     * --------------------------------------------------------------------- */
     public static double cosineSimilarity(List<Double> a, List<Double> b) {
         double dot = 0.0, na = 0.0, nb = 0.0;
+
         for (int i = 0; i < a.size(); i++) {
             dot += a.get(i) * b.get(i);
             na += a.get(i) * a.get(i);
             nb += b.get(i) * b.get(i);
         }
+
         return dot / (Math.sqrt(na) * Math.sqrt(nb) + 1e-12);
     }
 }

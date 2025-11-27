@@ -18,6 +18,11 @@ public class DocumentChunk {
 
     private String docId;
 
+    // user details
+    private String username;
+    private String email;
+    private String contactNumber;
+
     @Lob
     @Column(columnDefinition = "text")
     private String chunkText;
