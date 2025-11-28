@@ -1,5 +1,5 @@
-package com.example.ragspringopenai.service;
 
+package com.example.ragspringopenai.service;
 import com.example.ragspringopenai.model.DocumentChunk;
 import com.example.ragspringopenai.repo.DocumentChunkRepository;
 import com.fasterxml.jackson.core.type.TypeReference;
@@ -11,8 +11,10 @@ import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.http.ResponseEntity;
 import org.springframework.stereotype.Service;
 
+import java.time.Duration;
 import java.time.Instant;
 import java.util.*;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.stream.Collectors;
 
 @Service
@@ -23,6 +25,11 @@ public class EmbeddingService {
     private final OpenAiChatModel openAiChatModel;
     private final DocumentChunkRepository repo;
     private final ObjectMapper mapper = new ObjectMapper();
+
+    // Simple in-memory cache: key -> CachedEntry
+    private final ConcurrentHashMap<String, CachedEntry> cache = new ConcurrentHashMap<>();
+    // TTL for cached answers
+    private final Duration cacheTtl = Duration.ofMinutes(10);
 
     @Autowired
     public EmbeddingService(
@@ -125,21 +132,26 @@ public class EmbeddingService {
 
     /* ---------------------------------------------------------------------
      * 5. Full RAG Search – Retrieve → Enhance → Generate
+     *    Uses simple in-memory cache for identical questions.
      * --------------------------------------------------------------------- */
-    public ResponseEntity<?> searchDataUserRag(
-            String question,
-            List<Double> queryEmbedding,
-            double threshold,
-            String contactNumber) throws Exception {
+    public ResponseEntity<?> searchDataUserRag(String question, List<Double> queryEmbedding, double threshold, String contactNumber) throws Exception {
+
+        String key = cacheKey(question, contactNumber);
+        CachedEntry cached = cache.get(key);
+        if (cached != null && !cached.isExpired(cacheTtl)) {
+            return ResponseEntity.ok(cached.getPayload());
+        }
 
         List<Map.Entry<DocumentChunk, Double>> matches =
                 searchByEmbedding(queryEmbedding, threshold, contactNumber);
 
         if (matches.isEmpty()) {
-            return ResponseEntity.ok(Map.of(
+            Map<String, Object> resp = Map.of(
                     "found", false,
                     "answer", "No relevant information found in the PDF."
-            ));
+            );
+            cache.put(key, new CachedEntry(resp));
+            return ResponseEntity.ok(resp);
         }
 
         StringBuilder context = new StringBuilder();
@@ -154,11 +166,18 @@ public class EmbeddingService {
         // FIX → Using Spring AI OpenAIChatModel
         String answer = openAiChatModel.call(prompt);
 
-        return ResponseEntity.ok(Map.of(
+        Map<String, Object> resp = Map.of(
                 "found", true,
                 "matches", matches.size(),
                 "answer", answer
-        ));
+        );
+
+        cache.put(key, new CachedEntry(resp));
+        return ResponseEntity.ok(resp);
+    }
+
+    private String cacheKey(String question, String contactNumber) {
+        return (contactNumber == null ? "" : contactNumber.trim()) + "::" + (question == null ? "" : question.trim());
     }
 
     /* ---------------------------------------------------------------------
@@ -194,5 +213,24 @@ public class EmbeddingService {
             start = end + 1;
         }
         return chunks;
+    }
+
+    // Simple cache entry wrapper
+    private static class CachedEntry {
+        private final Map<String, Object> payload;
+        private final Instant createdAt;
+
+        CachedEntry(Map<String, Object> payload) {
+            this.payload = payload;
+            this.createdAt = Instant.now();
+        }
+
+        boolean isExpired(Duration ttl) {
+            return Instant.now().isAfter(createdAt.plus(ttl));
+        }
+
+        Map<String, Object> getPayload() {
+            return payload;
+        }
     }
 }
