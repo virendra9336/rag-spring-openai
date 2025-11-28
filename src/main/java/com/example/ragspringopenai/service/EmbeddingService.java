@@ -20,19 +20,18 @@ import java.util.stream.Collectors;
 public class EmbeddingService {
 
     private final EmbeddingModel embeddingModel;
-    @Autowired
-    private OpenAiChatModel chatModel;
+    private final OpenAiChatModel openAiChatModel;
     private final DocumentChunkRepository repo;
     private final ObjectMapper mapper = new ObjectMapper();
 
     @Autowired
     public EmbeddingService(
             EmbeddingModel embeddingModel,
-            OpenAiChatModel chatModel,
+            OpenAiChatModel openAiChatModel,
             DocumentChunkRepository repo
     ) {
         this.embeddingModel = embeddingModel;
-        this.chatModel = chatModel;
+        this.openAiChatModel = openAiChatModel;
         this.repo = repo;
     }
 
@@ -127,7 +126,7 @@ public class EmbeddingService {
     /* ---------------------------------------------------------------------
      * 5. Full RAG Search – Retrieve → Enhance → Generate
      * --------------------------------------------------------------------- */
-    public ResponseEntity<?> fullRagSearch(
+    public ResponseEntity<?> searchDataUserRag(
             String question,
             List<Double> queryEmbedding,
             double threshold,
@@ -153,7 +152,7 @@ public class EmbeddingService {
                         + "\nAnswer from the text only.";
 
         // FIX → Using Spring AI OpenAIChatModel
-        String answer = chatModel.call(prompt);
+        String answer = openAiChatModel.call(prompt);
 
         return ResponseEntity.ok(Map.of(
                 "found", true,
@@ -175,5 +174,25 @@ public class EmbeddingService {
         }
 
         return dot / (Math.sqrt(na) * Math.sqrt(nb) + 1e-12);
+    }
+    /* ---------------------------------------------------------------------
+     * Utility: Chunk Text
+     * --------------------------------------------------------------------- */
+    public List<String> chunkText(String text, int maxChars) {
+        List<String> chunks = new ArrayList<>();
+        if (text == null) return chunks;
+        text = text.replaceAll("\\r", " ").trim();
+        int start = 0;
+        while (start < text.length()) {
+            int end = Math.min(start + maxChars, text.length());
+            if (end < text.length()) {
+                int lastSpace = text.lastIndexOf(' ', end);
+                if (lastSpace > start) end = lastSpace;
+            }
+            String chunk = text.substring(start, end).trim();
+            if (!chunk.isEmpty()) chunks.add(chunk);
+            start = end + 1;
+        }
+        return chunks;
     }
 }

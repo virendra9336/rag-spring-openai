@@ -32,7 +32,7 @@ public class DocumentController {
     ) throws Exception {
         if (docId == null || docId.isBlank()) docId = java.util.UUID.randomUUID().toString();
         String text = PdfTextExtractor.extractText(file.getInputStream());
-        List<String> chunks = chunkText(text, 800);
+        List<String> chunks = embeddingService.chunkText(text, 800);
         for (String c : chunks) {
             var emb = embeddingService.getEmbedding(c);
             embeddingService.saveChunk(docId, username, email, contactNumber, c, emb);
@@ -62,23 +62,7 @@ public class DocumentController {
         return ResponseEntity.ok(java.util.Map.of("found", found, "matches", response));
     }
 
-    private List<String> chunkText(String text, int maxChars) {
-        List<String> chunks = new ArrayList<>();
-        if (text == null) return chunks;
-        text = text.replaceAll("\\r", " ").trim();
-        int start = 0;
-        while (start < text.length()) {
-            int end = Math.min(start + maxChars, text.length());
-            if (end < text.length()) {
-                int lastSpace = text.lastIndexOf(' ', end);
-                if (lastSpace > start) end = lastSpace;
-            }
-            String chunk = text.substring(start, end).trim();
-            if (!chunk.isEmpty()) chunks.add(chunk);
-            start = end + 1;
-        }
-        return chunks;
-    }
+
 
     @GetMapping("/rag-search")
     public ResponseEntity<?> ragSearch(
@@ -87,7 +71,7 @@ public class DocumentController {
             @RequestParam(value = "contactNumber", required = false) String contactNumber
     ) throws Exception {
         List<Double> qemb = embeddingService.getEmbedding(q);
-       return embeddingService.fullRagSearch(q, qemb, threshold, contactNumber);
+       return embeddingService.searchDataUserRag(q, qemb, threshold, contactNumber);
 
     }
 
