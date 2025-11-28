@@ -294,4 +294,95 @@ public class EmbeddingService {
             return payload;
         }
     }
+
+
+    /* ---------------------------------------------------------
+     * 8) Extract Resume Summary (Name, Email, Exp, Skills, Summary)
+     * --------------------------------------------------------- */
+    public ResponseEntity<?> extractResumeSummary(double threshold, String contactNumber) throws Exception {
+
+        // 1) Questions used for semantic search
+        List<String> questions = List.of(
+                "Extract personal details like name, email, phone.",
+                "Identify total experience.",
+                "Identify primary technologies and skills.",
+                "Summarize the resume in short bullets."
+        );
+
+        List<String> contextBlocks = new ArrayList<>();
+
+        for (String q : questions) {
+            List<Double> emb = getEmbedding(q);
+
+            List<Map.Entry<DocumentChunk, Double>> matches =
+                    searchByEmbedding(emb, threshold, contactNumber);
+
+            if (matches.isEmpty()) continue;
+
+            StringBuilder ctx = new StringBuilder();
+            for (var m : matches)
+                ctx.append(m.getKey().getChunkText()).append("\n\n");
+
+            contextBlocks.add(ctx.toString());
+        }
+
+        if (contextBlocks.isEmpty()) {
+            return ResponseEntity.ok(Map.of(
+                    "found", false,
+                    "summary", "No relevant resume information found."
+            ));
+        }
+
+        String finalContext = String.join("\n\n", contextBlocks);
+
+        // 2) Prompt for extracting structured JSON
+        String prompt =
+                """
+                You are a Resume Extractor AI.
+                Based ONLY on the following text, extract:
+    
+                1) Full Name  
+                2) Email Address  
+                3) Phone/Mobile Number  
+                4) Total Experience  
+                5) Technologies  
+                6) Summary of the candidate in bullet points (➤, 🔹, ⭐)
+    
+                Return STRICT JSON only:
+    
+                {
+                  "name": "",
+                  "email": "",
+                  "phone": "",
+                  "experience": "",
+                  "technologies": [],
+                  "summary": []
+                }
+    
+                -------- RESUME CONTENT --------
+                """ +
+                        finalContext +
+                        """
+                --------------------------------
+                Produce ONLY valid JSON. Do NOT wrap inside ```json.
+                """;
+
+        String jsonOutput = openAiChatModel.call(prompt);
+
+        // ⭐ FIX — Remove ```json or backticks so Jackson can parse
+        jsonOutput = jsonOutput
+                .replace("```json", "")
+                .replace("```", "")
+                .trim();
+
+        // Parse JSON safely
+        Map<String, Object> map = mapper.readValue(jsonOutput, new TypeReference<>() {});
+
+        return ResponseEntity.ok(Map.of(
+                "found", true,
+                "resumeSummary", map
+        ));
+    }
+
+
 }

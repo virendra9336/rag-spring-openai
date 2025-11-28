@@ -90,4 +90,12 @@ public class DocumentController {
         return embeddingService.summarizeDocument(threshold, contactNumber);
     }
 
+    @GetMapping("/extractResumeSummary")
+    public ResponseEntity<?> extractResumeSummary(
+            @RequestParam(value = "threshold", defaultValue = "0.60") double threshold,
+            @RequestParam(value = "contactNumber", required = false) String contactNumber
+    ) throws Exception {
+        return embeddingService.extractResumeSummary(threshold, contactNumber);
+    }
+
 }
