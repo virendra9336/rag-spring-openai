@@ -72,7 +72,22 @@ public class DocumentController {
     ) throws Exception {
         List<Double> qemb = embeddingService.getEmbedding(q);
        return embeddingService.searchDataUserRag(q, qemb, threshold, contactNumber);
+    }
 
+    @GetMapping("/rag-search-v2")
+    public ResponseEntity<?> ragSearchV2(
+            @RequestParam(value = "threshold", defaultValue = "0.60") double threshold,
+            @RequestParam(value = "contactNumber", required = false) String contactNumber
+    ) throws Exception {
+        return embeddingService.searchDataUserRag(null, null,threshold, contactNumber);
+    }
+
+    @GetMapping("/summarizeDocument")
+    public ResponseEntity<?> summarizeDocument(
+            @RequestParam(value = "threshold", defaultValue = "0.60") double threshold,
+            @RequestParam(value = "contactNumber", required = false) String contactNumber
+    ) throws Exception {
+        return embeddingService.summarizeDocument(threshold, contactNumber);
     }
 
 }

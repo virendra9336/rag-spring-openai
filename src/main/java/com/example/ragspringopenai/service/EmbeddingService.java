@@ -1,21 +1,20 @@
-
 package com.example.ragspringopenai.service;
+
 import com.example.ragspringopenai.model.DocumentChunk;
 import com.example.ragspringopenai.repo.DocumentChunkRepository;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
-import org.springframework.transaction.annotation.Transactional;
 import org.springframework.ai.embedding.EmbeddingModel;
 import org.springframework.ai.openai.OpenAiChatModel;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.http.ResponseEntity;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Transactional;
 
 import java.time.Duration;
 import java.time.Instant;
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
-import java.util.stream.Collectors;
 
 @Service
 @Transactional
@@ -26,10 +25,13 @@ public class EmbeddingService {
     private final DocumentChunkRepository repo;
     private final ObjectMapper mapper = new ObjectMapper();
 
-    // Simple in-memory cache: key -> CachedEntry
+    /** Cache for embeddings + RAG answers */
     private final ConcurrentHashMap<String, CachedEntry> cache = new ConcurrentHashMap<>();
-    // TTL for cached answers
-    private final Duration cacheTtl = Duration.ofMinutes(10);
+    private final Duration cacheTtl = Duration.ofMinutes(20);
+
+    /** Frequently searched questions */
+    private final List<String> predefinedQuestions =
+            List.of("9336323244", "capgemini", "Orange");
 
     @Autowired
     public EmbeddingService(
@@ -42,24 +44,30 @@ public class EmbeddingService {
         this.repo = repo;
     }
 
-    /* ---------------------------------------------------------------------
-     * 1. Generate Embedding
-     * --------------------------------------------------------------------- */
-
+    /* ---------------------------------------------------------
+     * 1) FAST EMBEDDING (Uses cache)
+     * ---------------------------------------------------------*/
     public List<Double> getEmbedding(String text) {
-        List<float[]> embeddings = embeddingModel.embed(List.of(text));
-        float[] arr = embeddings.get(0);
 
-        List<Double> list = new ArrayList<>(arr.length);
-        for (float f : arr) {
-            list.add((double) f);
+        String key = "emb:" + text.hashCode();
+
+        CachedEntry entry = cache.get(key);
+        if (entry != null && !entry.isExpired(cacheTtl)) {
+            return (List<Double>) entry.getPayload().get("value");
         }
-        return list;
+
+        float[] arr = embeddingModel.embed(List.of(text)).get(0);
+
+        List<Double> result = new ArrayList<>(arr.length);
+        for (float f : arr) result.add((double) f);
+
+        cache.put(key, new CachedEntry(Map.of("value", result)));
+        return result;
     }
 
-    /* ---------------------------------------------------------------------
-     * 2. Save Chunk
-     * --------------------------------------------------------------------- */
+    /* ---------------------------------------------------------
+     * 2) Save Chunk
+     * --------------------------------------------------------- */
     public DocumentChunk saveChunk(
             String docId,
             String username,
@@ -69,101 +77,108 @@ public class EmbeddingService {
             List<Double> embedding
     ) throws Exception {
 
-        String embJson = mapper.writeValueAsString(embedding);
-
         DocumentChunk chunk = DocumentChunk.builder()
                 .docId(docId)
                 .username(username)
                 .email(email)
                 .contactNumber(contactNumber)
                 .chunkText(chunkText)
-                .embeddingJson(embJson)
+                .embeddingJson(mapper.writeValueAsString(embedding))
                 .createdAt(Instant.now())
                 .build();
 
         return repo.save(chunk);
     }
 
-    /* ---------------------------------------------------------------------
-     * 3. Generic Search (Overloaded)
-     * --------------------------------------------------------------------- */
-    public List<Map.Entry<DocumentChunk, Double>> searchByEmbedding(
-            List<Double> queryEmbedding,
-            double threshold
-    ) throws Exception {
-        return searchByEmbedding(queryEmbedding, threshold, null);
+    /* ---------------------------------------------------------
+     * 3) Cosine Similarity
+     * --------------------------------------------------------- */
+    private static double cosine(List<Double> a, List<Double> b) {
+
+        double dot = 0, na = 0, nb = 0;
+
+        for (int i = 0; i < a.size(); i++) {
+            double x = a.get(i), y = b.get(i);
+            dot += x * y;
+            na += x * x;
+            nb += y * y;
+        }
+
+        return dot / (Math.sqrt(na) * Math.sqrt(nb) + 1e-12);
     }
 
-    /* ---------------------------------------------------------------------
-     * 4. Search by Embedding (Vector Search)
-     * --------------------------------------------------------------------- */
+    /* ---------------------------------------------------------
+     * 4) Vector Search
+     * --------------------------------------------------------- */
     public List<Map.Entry<DocumentChunk, Double>> searchByEmbedding(
-            List<Double> queryEmbedding,
+            List<Double> qEmb,
             double threshold,
             String contactNumber
     ) throws Exception {
 
-        List<DocumentChunk> chunks =
-                (contactNumber == null || contactNumber.isBlank())
-                        ? repo.findAll()
-                        : repo.findByContactNumber(contactNumber);
+        List<DocumentChunk> chunks = (contactNumber == null || contactNumber.isBlank())
+                ? repo.findAll()
+                : repo.findByContactNumber(contactNumber);
 
-        List<Map.Entry<DocumentChunk, Double>> results = new ArrayList<>();
+        List<Map.Entry<DocumentChunk, Double>> results = new ArrayList<>(chunks.size());
 
-        for (DocumentChunk chunk : chunks) {
+        for (DocumentChunk c : chunks) {
 
-            List<Double> chunkEmbedding =
-                    mapper.readValue(chunk.getEmbeddingJson(), new TypeReference<List<Double>>() {});
+            List<Double> emb =
+                    mapper.readValue(c.getEmbeddingJson(), new TypeReference<List<Double>>() {});
 
-            // Skip corrupted embeddings
-            if (chunkEmbedding.size() != queryEmbedding.size()) {
-                continue;
-            }
+            if (emb.size() != qEmb.size()) continue;
 
-            double score = cosineSimilarity(queryEmbedding, chunkEmbedding);
-            results.add(Map.entry(chunk, score));
+            double sim = cosine(qEmb, emb);
+
+            if (sim >= threshold)
+                results.add(Map.entry(c, sim));
         }
 
-        return results.stream()
-                .filter(e -> e.getValue() >= threshold)
-                .sorted((a, b) -> Double.compare(b.getValue(), a.getValue())) // descending
-                .collect(Collectors.toList());
+        // Sort descending
+        results.sort((a, b) -> Double.compare(b.getValue(), a.getValue()));
+        return results;
     }
 
-    /* ---------------------------------------------------------------------
-     * 5. Full RAG Search – Retrieve → Enhance → Generate
-     *    Uses simple in-memory cache for identical questions.
-     * --------------------------------------------------------------------- */
-    public ResponseEntity<?> searchDataUserRag(String question, List<Double> queryEmbedding, double threshold, String contactNumber) throws Exception {
+    /* ---------------------------------------------------------
+     * 5) Full RAG Search (Fast + Cached)
+     * --------------------------------------------------------- */
+    public ResponseEntity<?> searchDataUserRag(
+            String question,
+            List<Double> qEmb,
+            double threshold,
+            String contactNumber
+    ) throws Exception {
 
-        String key = cacheKey(question, contactNumber);
+        String key = "rag:" + question.hashCode() + ":" + contactNumber;
+
+        // Return from cache
         CachedEntry cached = cache.get(key);
         if (cached != null && !cached.isExpired(cacheTtl)) {
             return ResponseEntity.ok(cached.getPayload());
         }
 
         List<Map.Entry<DocumentChunk, Double>> matches =
-                searchByEmbedding(queryEmbedding, threshold, contactNumber);
+                searchByEmbedding(qEmb, threshold, contactNumber);
 
         if (matches.isEmpty()) {
             Map<String, Object> resp = Map.of(
                     "found", false,
-                    "answer", "No relevant information found in the PDF."
+                    "answer", "No relevant information found."
             );
             cache.put(key, new CachedEntry(resp));
             return ResponseEntity.ok(resp);
         }
 
-        StringBuilder context = new StringBuilder();
-        matches.forEach(m -> context.append(m.getKey().getChunkText()).append("\n\n"));
+        StringBuilder ctx = new StringBuilder();
+        for (var m : matches) ctx.append(m.getKey().getChunkText()).append("\n\n");
 
         String prompt =
-                "Use ONLY the following text to answer the question:\n\n"
-                        + context
-                        + "\n\nQuestion: " + question
-                        + "\nAnswer from the text only.";
+                "Use ONLY the following text to answer the question:\n\n" +
+                        ctx +
+                        "\nQuestion: " + question +
+                        "\nAnswer strictly from the above text.";
 
-        // FIX → Using Spring AI OpenAIChatModel
         String answer = openAiChatModel.call(prompt);
 
         Map<String, Object> resp = Map.of(
@@ -176,27 +191,70 @@ public class EmbeddingService {
         return ResponseEntity.ok(resp);
     }
 
-    private String cacheKey(String question, String contactNumber) {
-        return (contactNumber == null ? "" : contactNumber.trim()) + "::" + (question == null ? "" : question.trim());
-    }
+    /* ---------------------------------------------------------
+     * 6) Summary API (Highly Optimized)
+     * --------------------------------------------------------- */
+    public ResponseEntity<?> summarizeDocument(double threshold, String contactNumber) throws Exception {
 
-    /* ---------------------------------------------------------------------
-     * Utility: Cosine Similarity
-     * --------------------------------------------------------------------- */
-    public static double cosineSimilarity(List<Double> a, List<Double> b) {
-        double dot = 0.0, na = 0.0, nb = 0.0;
+        List<String> questions = List.of(
+                "Summarize this entire document.",
+                "List important points.",
+                "Explain the document meaning."
+        );
 
-        for (int i = 0; i < a.size(); i++) {
-            dot += a.get(i) * b.get(i);
-            na += a.get(i) * a.get(i);
-            nb += b.get(i) * b.get(i);
+        List<String> contextBlocks = new ArrayList<>();
+
+        for (String q : questions) {
+
+            List<Double> emb = getEmbedding(q);
+
+            List<Map.Entry<DocumentChunk, Double>> matches =
+                    searchByEmbedding(emb, threshold, contactNumber);
+
+            if (matches.isEmpty()) continue;
+
+            StringBuilder ctx = new StringBuilder();
+            for (var m : matches)
+                ctx.append(m.getKey().getChunkText()).append("\n\n");
+
+            contextBlocks.add(ctx.toString());
         }
 
-        return dot / (Math.sqrt(na) * Math.sqrt(nb) + 1e-12);
+        if (contextBlocks.isEmpty()) {
+            return ResponseEntity.ok(Map.of(
+                    "found", false,
+                    "summary", "No relevant text found."
+            ));
+        }
+
+        String finalContext = String.join("\n\n", contextBlocks);
+
+        String prompt =
+                """
+                Summarize the following PDF content.
+                Use these symbols:
+                ➤ Key Point
+                ⭐ Important
+                🔹 Detail
+
+                ----- PDF CONTENT -----
+                """ +
+                        finalContext +
+                        """
+
+                -------------------------
+
+                Create a clean, structured summary with bullet symbols.
+                """;
+
+        String summary = openAiChatModel.call(prompt);
+
+        return ResponseEntity.ok(Map.of(
+                "found", true,
+                "summary", summary
+        ));
     }
-    /* ---------------------------------------------------------------------
-     * Utility: Chunk Text
-     * --------------------------------------------------------------------- */
+
     public List<String> chunkText(String text, int maxChars) {
         List<String> chunks = new ArrayList<>();
         if (text == null) return chunks;
@@ -215,7 +273,10 @@ public class EmbeddingService {
         return chunks;
     }
 
-    // Simple cache entry wrapper
+
+    /* ---------------------------------------------------------
+     * 7) Cached Object Wrapper
+     * --------------------------------------------------------- */
     private static class CachedEntry {
         private final Map<String, Object> payload;
         private final Instant createdAt;
