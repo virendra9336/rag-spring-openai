@@ -83,7 +83,7 @@ public class DocumentController {
     }
 
     @GetMapping("/summarizeDocument")
-    public ResponseEntity<?> summarizeDocument(
+    public ResponseEntity<?> summarizeDocumentInSpecificFormat(
             @RequestParam(value = "threshold", defaultValue = "0.60") double threshold,
             @RequestParam(value = "contactNumber", required = false) String contactNumber
     ) throws Exception {

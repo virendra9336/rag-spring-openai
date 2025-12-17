@@ -3,7 +3,6 @@ package com.example.ragspringopenai.model;
 import jakarta.persistence.*;
 import lombok.*;
 import java.time.Instant;
-
 @Entity
 @Table(name = "document_chunk")
 @Getter
@@ -12,6 +11,7 @@ import java.time.Instant;
 @AllArgsConstructor
 @Builder
 public class DocumentChunk {
+
     @Id
     @GeneratedValue(strategy = GenerationType.IDENTITY)
     private Long id;
@@ -23,12 +23,10 @@ public class DocumentChunk {
     private String email;
     private String contactNumber;
 
-    @Lob
-    @Column(columnDefinition = "text")
+    @Column(columnDefinition = "TEXT")
     private String chunkText;
 
-    @Lob
-    @Column(columnDefinition = "text")
+    @Column(columnDefinition = "TEXT")
     private String embeddingJson;
 
     private Instant createdAt;
